@@ -57,6 +57,10 @@ from rich.text import Text
 # shapely
 from shapely.geometry import Polygon
 
+# python-dotenv
+from dotenv import load_dotenv
+load_dotenv()
+
 console = Console()
 
 def sisyphus(
