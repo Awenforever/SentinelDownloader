@@ -29,7 +29,7 @@ export OLD_EMAIL="$OLD_EMAIL"
 export CORRECT_EMAIL="$CORRECT_EMAIL"
 
 
-git filter-branch --env-filter '
+git filter-branch -f --env-filter '
 if [ "$GIT_COMMITTER_NAME" = "$OLD_NAME" ] || [ "$GIT_COMMITTER_EMAIL" = "$OLD_EMAIL" ] || [ "$GIT_AUTHOR_NAME" = "$OLD_NAME" ] || [ "$GIT_AUTHOR_EMAIL" = "$OLD_EMAIL" ]; then
     if [ "$GIT_COMMITTER_NAME" = "$OLD_NAME" ]; then
         export GIT_COMMITTER_NAME="$CORRECT_NAME"
