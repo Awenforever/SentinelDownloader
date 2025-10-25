@@ -10,11 +10,28 @@ if [[ -z "$OLD_NAME" || -z "$CORRECT_NAME" || -z "$OLD_EMAIL" || -z "$CORRECT_EM
     exit 1
 fi
 
-git filter-repo --force --commit-callback '
-if commit.author_name == "'"$OLD_NAME"'":
-    commit.author_name = "'"$CORRECT_NAME"'"
-    commit.author_email = "'"$CORRECT_EMAIL"'"
-if commit.committer_name == "'"$OLD_NAME"'":
-    commit.committer_name = "'"$CORRECT_NAME"'"
-    commit.committer_email = "'"$CORRECT_EMAIL"'"
-'
+# 检查是否安装了 git-filter-repo
+if ! command -v git-filter-repo &> /dev/null; then
+    echo "正在安装 git-filter-repo..."
+    pip install git-filter-repo
+fi
+
+# 方法1：使用环境变量（推荐）
+export OLD_NAME CORRECT_NAME OLD_EMAIL CORRECT_EMAIL
+
+git filter-repo --force --commit-callback "
+import os
+old_name = os.environ['OLD_NAME']
+correct_name = os.environ['CORRECT_NAME']
+old_email = os.environ['OLD_EMAIL']
+correct_email = os.environ['CORRECT_EMAIL']
+
+if commit.author_name == old_name.encode('utf-8'):
+    commit.author_name = correct_name.encode('utf-8')
+    commit.author_email = correct_email.encode('utf-8')
+if commit.committer_name == old_name.encode('utf-8'):
+    commit.committer_name = correct_name.encode('utf-8')
+    commit.committer_email = correct_email.encode('utf-8')
+"
+
+echo "历史记录修改完成！"
