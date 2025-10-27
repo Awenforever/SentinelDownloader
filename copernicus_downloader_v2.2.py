@@ -14,7 +14,8 @@ Copyright (c) 2025 Jinhong Wu. All rights reserved.
 from __future__ import annotations
 from contextlib import contextmanager
 import hashlib
-import json
+import tomlkit
+from tomlkit.exceptions import ParseError
 import random
 import shutil
 import sys
@@ -59,7 +60,7 @@ from shapely.geometry import Polygon
 
 # python-dotenv
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv()  # doif: cannot find gdal data, modify `.env`
 
 console = Console()
 
@@ -386,18 +387,50 @@ class TokenManager:
             return self._access_t
 
 
+class Config:
+    def __set_name__(self, owner, name):
+        self.name = f"_{name}"
+
+    def __set__(self, instance, value):
+        assert isinstance(value, dict)
+
+        required_fields = {
+            "authentication": ["username", "password"],
+            "proxy": ["ip_port"],
+            "runtime": ["save_folder"],
+            "filter": ["roi_json_path"],
+            "search_url": ["default"]
+        }
+
+        missing_keys = [
+            f"{section}.{key}"
+            for section, keys in required_fields.items()
+            for key in keys
+            if section not in value or key not in value[section]
+        ]
+
+        if missing_keys:
+            raise RuntimeError("Missing Keys: " + ", ".join(missing_keys))
+
+        setattr(instance, self.name, value)  # AttributeError: 'dict' object has no attribute '__dict__'
+
+    def __get__(self, instance, owner):
+        return getattr(instance, self.name)
+
+
 @singleton
 class SentinelDownloader:
     crs = 'EPSG: 4326'  # WGS84
+    config = Config()
 
     def __init__(self, config_path: Path):
-        # ----- reading config json -----
+        # ----- load config toml -----
         try:
             with open(config_path, 'r') as file:
-                config = json.load(file)
+                config = self.config = tomlkit.load(file)
         except FileNotFoundError:
             raise ValueError(f"Configuration file does not exist: {config_path}")
-        except json.JSONDecodeError:
+        except ParseError:
             raise ValueError(f"Configuration file format error: {config_path}")
 
         # ----- instance property -----
@@ -411,35 +444,39 @@ class SentinelDownloader:
 
         # ----- configuration -----
         # identity authentication
-        auth_config = config.get('authentication', {})
+        auth_config = config.get('authentication')
         username = auth_config.get('username')
         password = auth_config.get('password')
 
-        # search url
-        app_config = config.get('config', {})
-        self.search_url = app_config.get('search_url', '').strip()
-
         # proxy
-        ip_port = app_config.get('ip_port')
+        ip_port = config.get('proxy').get('ip_port')
         self.proxies = {
             "http": ip_port,
             "https": ip_port,
         }
 
-        # save path
-        save_folder = Path(app_config.get('save_folder'))
+        # runtime settings
+        runtime_config = config.get('runtime')
+
+        # 1. save path
+        save_folder = Path(runtime_config.get('save_folder'))
         self._finish = save_folder / 'Finish'
         self._temp = save_folder / 'Temp'
 
-        # runtime setting
-        self.num_workers = app_config.get('num_workers', 1)
-        self.pause_prob = app_config.get('random_pause_prob', 0.0)
+        # 2. threading num | default 1
+        self.num_workers = runtime_config.get('num_workers', 1)
+
+        # 3. random pause probability | set to 0.0 as `no pause`, default 0.0
+        self.pause_prob = runtime_config.get('random_pause_prob', 0.0)
 
         # filter
         roi = Path(config.get('filter').get('roi_json_path'))
         self.roi_gdf = gpd.read_file(roi)
 
-        # initialize token
+        # search url
+        self.search_url = config.get('search_url').get('default').strip()
+
+        # ----- initialize token -----
         self.token = TokenManager(username, password, self.proxies)
         self.token.initialize()
 
@@ -680,6 +717,6 @@ class SentinelDownloader:
 
 
 if __name__ == '__main__':
-    config_json = Path('./config.json')
-    downloader = SentinelDownloader(config_json)
+    config_toml = Path('./cfg.toml')  # duplicate `cfg_example.toml` and customize
+    downloader = SentinelDownloader(config_toml)
     downloader.multi_download()
