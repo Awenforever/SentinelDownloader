@@ -1,11 +1,12 @@
 [workspace]
-authors = ["ahuiforever <king_wedo@163.com>"]
+authors = ["Awenforever <king_wedo@163.com>"]
 channels = ["conda-forge"]
 name = "SentinelDownloader"
 platforms = ["win-64"]
 version = "0.1.0"
 
 [tasks]
+dl = 'python .\copernicus_downloader_v2.2.py'
 
 [dependencies]
 python = "3.10.*"
