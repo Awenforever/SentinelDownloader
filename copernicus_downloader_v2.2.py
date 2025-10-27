@@ -722,6 +722,6 @@ class SentinelDownloader:
 
 
 if __name__ == '__main__':
-    config_toml = Path('./cfg.toml')  # duplicate `cfg_example.toml` and customize
+    config_toml = Path('./cfg.toml')  # duplicate `cfg_example.tOml` and customize
     downloader = SentinelDownloader(config_toml)
     downloader.multi_download()
