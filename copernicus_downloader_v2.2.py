@@ -14,8 +14,6 @@ Copyright (c) 2025 Jinhong Wu. All rights reserved.
 from __future__ import annotations
 from contextlib import contextmanager
 import hashlib
-import tomlkit
-from tomlkit.exceptions import ParseError
 import random
 import shutil
 import sys
@@ -26,8 +24,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed, CancelledError
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 from typing import Callable, Optional, Any
-import requests
 import inspect
+import traceback
+
+# tomlkit
+import tomlkit
+from tomlkit.exceptions import ParseError
+
+# requests
+import requests
 from requests.exceptions import HTTPError, RequestException
 
 # keyboard
@@ -527,7 +532,7 @@ class SentinelDownloader:
 
     def _is_within_roi(self, geo_footprint: Polygon) -> bool:
         product_gdf = gpd.GeoDataFrame(geometry=[geo_footprint], crs=self.crs)
-        return len(gpd.overlay(product_gdf, self.roi_gdf, how='intersection')) > 0
+        return len(gpd.overlay(product_gdf, self.roi_gdf, how='intersection', keep_geom_type=False)) > 0
 
     def _hash_check(self, file_path: Path) -> bool:
         h = hashlib.md5()
@@ -674,11 +679,11 @@ class SentinelDownloader:
                 TaskProgressColumn(
                     "[progress.percentage]{task.percentage:>3.1f}%"
                 ),
-                "• 🚀",
+                "• 🚀 ",
                 SmartTransferSpeedColumn(),
-                "• ⌚ [yellow]",
+                "• ⌚[yellow]",
                 TimeElapsedColumn(),
-                "• ⏳ [cyan]",
+                "• ⏳[cyan]",
                 TimeRemainingColumn(),
                 console=console,
                 expand=True,
@@ -702,7 +707,7 @@ class SentinelDownloader:
                     except CancelledError:
                         pass
                     except Exception as e:
-                        console.log(f"Unhandled error in future: {e}")
+                        console.log(f"Unhandled error in future: {e}\n{traceback.format_exc()}")
 
                     completed, omitted = self.count.value, self.omit.value
                     self.progress.update(
