@@ -65,9 +65,10 @@ from shapely.geometry import Polygon
 
 # python-dotenv
 from dotenv import load_dotenv
-load_dotenv()  # doif: cannot find gdal data, modify `.env`
+load_dotenv()  # ! do: in case cannot find gdal data, modify `.env`
 
 console = Console()
+
 
 def sisyphus(
         wait: bool = False,
@@ -277,7 +278,7 @@ class SmartTransferSpeedColumn(TransferSpeedColumn):
     def render(self, task: "Task") -> Text:
         speed = task.finished_speed or task.speed
         if speed is None:
-            return Text(f'?', style="progress.data.speed")
+            return Text('?', style="progress.data.speed")
 
         if task.total >= SmartDownloadColumn.threshold:
             data_speed: str = filesize.decimal(int(speed)) + '/s'
@@ -328,26 +329,28 @@ class TokenManager:
         self._expired_t: str = ''
         self._access_time = None
         self._refresh_time = None
-        self._lock = threading.RLock()  # todo: check if there is lock in lock || fixed ✔
+        self._lock = threading.RLock()  # || todo: check if there is nested lock || fixed ✔
 
     def _get_token(self, token_type: str) -> tuple[str, str]:
-        if token_type == 'access_token':
-            data = {
-                'client_id': 'cdse-public',
-                'username': self._username,
-                'password': self._password,
-                'grant_type': 'password',
-            }
-        elif token_type == 'refresh_token':
-            data = {
-                'client_id': 'cdse-public',
-                'refresh_token': self._refresh_t,
-                'grant_type': 'refresh_token',
-            }
-        else:
-            raise ValueError(
-                f'`token_type` must be either `access_token` or `refresh_token`, got `{token_type}` instead.'
-            )
+        data: dict = {}
+        match token_type:
+            case 'access_token':
+                data = {
+                    'client_id': 'cdse-public',
+                    'username': self._username,
+                    'password': self._password,
+                    'grant_type': 'password',
+                }
+            case 'refresh_token':
+                data = {
+                    'client_id': 'cdse-public',
+                    'refresh_token': self._refresh_t,
+                    'grant_type': 'refresh_token',
+                }
+            case _:
+                raise ValueError(
+                    f'`token_type` must be either `access_token` or `refresh_token`, got `{token_type}` instead.'
+                )
         r = requests.post(
             url="https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token",
             data=data,
@@ -526,7 +529,7 @@ class SentinelDownloader:
                 'server_md5': next((check['Value'] for check in item['Checksum'] if check['Algorithm'] == 'MD5'), None),
                 'geo_footprint': Polygon(item['GeoFootprint']['coordinates'][0]),
                 'content_length': int(item['ContentLength'])
-            } for item in items])  # todo: does items contain the MD5 and other information i need || fixed ✔
+            } for item in items])  # || todo: does items contain the MD5 and other information i need || fixed ✔
         console.log(f'Meta information for {len(search_result)} data entries has been collected. [green]✔')
         return search_result
 
@@ -722,6 +725,6 @@ class SentinelDownloader:
 
 
 if __name__ == '__main__':
-    config_toml = Path('./cfg.toml')  # duplicate `cfg_example.tOml` and customize
+    config_toml = Path('./cfg.toml')  # % duplicate `cfg_example.toml` and customize 
     downloader = SentinelDownloader(config_toml)
     downloader.multi_download()
