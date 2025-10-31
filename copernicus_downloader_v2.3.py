@@ -527,17 +527,34 @@ class Config:
     config_path: Path = field(repr=False, default=Path)
     loaded_toml = ConfigCheck()
 
-    username = ValidatedInput(str, regex=r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2}$")
+    username = ValidatedInput(
+        str,
+        regex=r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$",
+        error_message='`username` must be a valid email address'
+    )
     password: str = field(init=False, repr=False)
     proxies: dict = field(init=False)
     finish: Path = field(init=False)
     temp: Path = field(init=False)
     roi_gdf: gpd.GeoDataFrame = field(init=False, repr=False)
-    search_url = ValidatedInput(str, contains=['$top', '$skip'], regex=r"^https?://.+")
     token: TokenManager = field(init=False, repr=False)
 
-    num_workers = ValidatedInput(int, data_range=(1, 32))
-    pause_prob = ValidatedInput(float, data_range=(0.0, 1.0))
+    search_url = ValidatedInput(
+        str,
+        contains=['$top', '$skip'],
+        regex=r"^https?://.+",
+        error_message='`search_url` format error, missing `$top` or `$skip` parameter'
+    )
+    num_workers = ValidatedInput(
+        int,
+        data_range=(1, 32),
+        error_message='`num_workers` must be an integer between 1 and 32'
+    )
+    pause_prob = ValidatedInput(
+        float,
+        data_range=(0.0, 1.0),
+        error_message='`pause_prob` must be a float between 0.0 and 1.0'
+    )
 
     def __post_init__(self):
         self.loaded_toml = self._load_from_toml()
