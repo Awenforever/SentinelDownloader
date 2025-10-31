@@ -13,7 +13,6 @@ Copyright (c) 2025 Jinhong Wu. All rights reserved.
 # local
 from __future__ import annotations
 from contextlib import contextmanager
-from functools import partial
 from dataclasses import dataclass, field
 import hashlib
 import random
@@ -25,9 +24,10 @@ import functools
 from concurrent.futures import ThreadPoolExecutor, as_completed, CancelledError
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
-from typing import Callable, Optional, Any
+from typing import Callable, Optional, Any, Tuple, List, Type, Union
 import inspect
 import traceback
+import re
 
 # tomlkit
 import tomlkit
@@ -411,14 +411,6 @@ class ConfigCheck:
         :param value: Value to set
         :return: None
         """
-        try:
-            with open(value, 'r') as file:
-                config: dict = tomlkit.load(file)
-        except FileNotFoundError:
-            raise ValueError(f"Configuration file does not exist: {value}")
-        except ParseError:
-            raise ValueError(f"Configuration file format error: {value}")
-
         required_fields = {
             "authentication": ["username", "password"],
             "proxy": ["ip_port"],
@@ -431,13 +423,13 @@ class ConfigCheck:
             f"{section}.{key}"
             for section, keys in required_fields.items()
             for key in keys
-            if section not in config or key not in config[section]
+            if section not in value or key not in value[section]
         ]
 
         if missing_keys:
             raise RuntimeError("Missing Keys: " + ", ".join(missing_keys))
 
-        setattr(instance, self.name, config)  # AttributeError: 'dict' object has no attribute '__dict__'
+        setattr(instance, self.name, value)  # AttributeError: 'dict' object has no attribute '__dict__'
 
     def __get__(self, instance, owner) -> dict:
         """
@@ -451,66 +443,152 @@ class ConfigCheck:
         return getattr(instance, self.name)
 
 
-@dataclass(frozen=True)
-class Config:
-    loaded_toml: dict = field(repr=False, default_factory=dict)
+class ValidatedInput:
+    """
+    A general-purpose data descriptor for performing
+    configurable type, range, content, and regex validation on attribute assignment.
+    """
 
-    username: str = field(init=False)
+    def __init__(
+            self,
+            data_type: Type,
+            data_range: Optional[Union[Tuple[int|float, int|float], List[int|float]]] = None,
+            contains: Optional[List[str]] = None,
+            regex: Optional[str] = None,
+            error_message: Optional[str] = None
+    ):
+        """
+        Initializes the validator.
+
+        :param data_type: Required Python type (e.g., int, str, Path).
+        :param data_range: A tuple (min, max) for numerical range checking.
+        :param contains: A list of strings; the value must contain all these substrings.
+        :param regex: A regex string; the value must match this pattern.
+        :param error_message: A custom override error message.
+        """
+        self.data_type = data_type
+        self.data_range = data_range
+        self.contains = contains
+        self.regex_pattern = re.compile(regex) if regex else None  # Pre-compile regex
+        self.error_message = error_message
+        self.name = None  # Private storage name
+        self.public_name = None  # Public attribute name (for error messages)
+
+    def __set_name__(self, owner: Type, name: str):
+        """Sets the private attribute name, e.g., '_username'"""
+        self.name = f"_{name}"
+        self.public_name = name
+
+    def __set__(self, instance: Any, value: Any):
+        """
+        Core validation logic: checks the input value based on init parameters.
+        """
+
+        # 1. Type check
+        if not isinstance(value, self.data_type):
+            error = self.error_message or f"'{self.public_name}' must be of type {self.data_type.__name__}, but got {type(value).__name__}."
+            raise TypeError(error)
+
+        # 2. Range check (for numerics only)
+        if self.data_range and isinstance(value, (int, float)):
+            min_val, max_val = map(float, self.data_range)
+            if not (min_val <= value <= max_val):
+                error = self.error_message or f"'{self.public_name}' value {value} must be between {min_val} and {max_val}."
+                raise ValueError(error)
+
+        # 3. Content check (for strings only)
+        if self.contains and isinstance(value, str):
+            for item in self.contains:
+                if item not in value:
+                    error = self.error_message or f"'{self.public_name}' must contain the substring '{item}'."
+                    raise ValueError(error)
+
+        # 4. Regex check (for strings only)
+        if self.regex_pattern and isinstance(value, str):
+            if not self.regex_pattern.match(value):
+                error = self.error_message or f"'{self.public_name}' does not match the required format."
+                raise ValueError(error)
+
+        # Validation passed: store the value
+        setattr(instance, self.name, value)
+
+    def __get__(self, instance: Any, owner: Type) -> Any:
+        """
+        Reads the value, retrieving it from the instance's private attribute.
+        """
+        if instance is None:
+            return self
+
+        return getattr(instance, self.name, None)
+
+
+@dataclass(frozen=False)
+class Config:
+    config_path: Path = field(repr=False, default=Path)
+    loaded_toml = ConfigCheck()
+
+    username = ValidatedInput(str, regex=r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2}$")
     password: str = field(init=False, repr=False)
-    proxies: str = field(init=False)
+    proxies: dict = field(init=False)
     finish: Path = field(init=False)
     temp: Path = field(init=False)
     roi_gdf: gpd.GeoDataFrame = field(init=False, repr=False)
-    search_url: str = field(init=False, repr=False)
+    search_url = ValidatedInput(str, contains=['$top', '$skip'], regex=r"^https?://.+")
     token: TokenManager = field(init=False, repr=False)
 
-    num_workers: int = field(init=False, default=1)
-    pause_prob: float = field(init=False, default=0.0)
+    num_workers = ValidatedInput(int, data_range=(1, 32))
+    pause_prob = ValidatedInput(float, data_range=(0.0, 1.0))
 
     def __post_init__(self):
-        t = self.loaded_toml
-        setter = partial(object.__setattr__, self)
+        self.loaded_toml = self._load_from_toml()
 
         # ----- identity authentication -----
-        setter('username', t['authentication']['username'])
-        setter('password', t['authentication']['password'])
+        self.username = self.loaded_toml['authentication']['username']
+        self.password = self.loaded_toml['authentication']['password']
 
         # ----- proxy -----
-        ip_port = t['proxy']['ip_port']
-        setter('proxies', {"http": ip_port, "https": ip_port})
+        ip_port = self.loaded_toml['proxy']['ip_port']
+        self.proxies = {"http": ip_port, "https": ip_port}
 
         # ----- runtime settings -----
-        runtime = t['runtime']
+        runtime = self.loaded_toml['runtime']
         # 1. save path
         save_folder = Path(runtime['save_folder'])
-        setter('finish', save_folder / 'Finish')
-        setter('temp', save_folder / 'Temp')
+        self.finish = save_folder / 'Finish'
+        self.temp = save_folder / 'Temp'
         # 2. threading num | default 1
-        setter('num_workers', runtime.get('num_workers', 1))
+        self.num_workers = runtime.get('num_workers', 1)
         # 3. random pause probability | set to 0.0 as `no pause`, default 0.0
-        setter('pause_prob', runtime.get('random_pause_prob', 0.0))
+        self.pause_prob = runtime.get('random_pause_prob', 0.0)
 
         # ----- filter -----
-        roi = Path(t['filter']['roi_json_path'])
-        setter('roi_gdf', gpd.read_file(roi))
+        roi = Path(self.loaded_toml['filter']['roi_json_path'])
+        self.roi_gdf = gpd.read_file(roi)
 
         # ----- search url -----
-        setter('search_url', t['search_url']['default'].strip())
+        self.search_url = self.loaded_toml['search_url']['default'].strip()
 
         # ----- initialize token -----
-        setter('token', TokenManager(self.username, self.password, self.proxies))
+        self.token = TokenManager(self.username, self.password, self.proxies)
         self.token.initialize()
+
+    def _load_from_toml(self) -> dict:
+        try:
+            with open(self.config_path, 'r') as file:
+                return tomlkit.load(file)
+        except FileNotFoundError:
+            raise ValueError(f"Configuration file does not exist: {self.config_path}")
+        except ParseError:
+            raise ValueError(f"Configuration file format error: {self.config_path}")
 
 
 @singleton
 class SentinelDownloader:
     crs = 'EPSG: 4326'  # WGS84
-    _load = ConfigCheck()
 
     def __init__(self, config_path: Path):
         # ----- load config toml -----
-        self._load = config_path
-        self._config = Config(loaded_toml=self._load)
+        self._config = Config(config_path=config_path)
 
         # ----- instance property -----
         self.worker = WorkerManager()
@@ -520,8 +598,8 @@ class SentinelDownloader:
         self._local = threading.local()
         self._local.server_md5 = None
 
-    def __getattr__(self, item):  # delegate to config
-        if item in self._config.__dataclass_fields__:
+    def __getattr__(self, item):
+        if hasattr(self._config, item):
             return getattr(self._config, item)
         raise AttributeError(
             f"`{self.__class__.__name__}/{self._config.__class__.__name__}` "

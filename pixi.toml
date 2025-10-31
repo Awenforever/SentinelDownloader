@@ -6,10 +6,10 @@ platforms = ["win-64"]
 version = "0.1.0"
 
 [tasks]
-dl = 'python .\copernicus_downloader_v2.2.py'
+dl = 'python .\copernicus_downloader_v2.3.py'
 
 [dependencies]
-python = ">=3.12.12,<3.13"
+python = "3.12.*"
 matplotlib = ">=3.10.7,<4"
 pixi-pycharm = ">=0.0.9,<0.0.10"
 gdal = ">=3.10.3,<4"
