@@ -13,6 +13,8 @@ Copyright (c) 2025 Jinhong Wu. All rights reserved.
 # local
 from __future__ import annotations
 from contextlib import contextmanager
+from functools import partial
+from dataclasses import dataclass, field
 import hashlib
 import random
 import shutil
@@ -395,12 +397,26 @@ class TokenManager:
             return self._access_t
 
 
-class Config:
+class ConfigCheck:
     def __set_name__(self, owner, name):
         self.name = f"_{name}"
 
     def __set__(self, instance, value):
-        assert isinstance(value, dict)
+        """
+        Validate and set configuration values.
+        :param self: Data descriptor instance, here `SentinelDownloader.config`
+        :param instance: Instance of the class using this descriptor,
+                here `SentinelDownloader.self`
+        :param value: Value to set
+        :return: None
+        """
+        try:
+            with open(value, 'r') as file:
+                config: dict = tomlkit.load(file)
+        except FileNotFoundError:
+            raise ValueError(f"Configuration file does not exist: {value}")
+        except ParseError:
+            raise ValueError(f"Configuration file format error: {value}")
 
         required_fields = {
             "authentication": ["username", "password"],
@@ -414,35 +430,88 @@ class Config:
             f"{section}.{key}"
             for section, keys in required_fields.items()
             for key in keys
-            if section not in value or key not in value[section]
+            if section not in config or key not in config[section]
         ]
 
         if missing_keys:
             raise RuntimeError("Missing Keys: " + ", ".join(missing_keys))
 
-        setattr(instance, self.name, value)  # AttributeError: 'dict' object has no attribute '__dict__'
+        setattr(instance, self.name, config)  # AttributeError: 'dict' object has no attribute '__dict__'
 
-    def __get__(self, instance, owner):
+    def __get__(self, instance, owner) -> dict:
+        """
+        Retrieve the configuration dictionary.
+        :param self: Data descriptor instance, here `SentinelDownloader.config`
+        :param instance: Instance of the class using this descriptor,
+                here `SentinelDownloader.self`
+        :param owner: Owner class, here `SentinelDownloader`
+        :return: Configuration dictionary
+        """
         return getattr(instance, self.name)
+
+
+@dataclass(frozen=True)
+class Config:
+    loaded_toml: dict = field(repr=False, default_factory=dict)
+
+    username: str = field(init=False)
+    password: str = field(init=False, repr=False)
+    proxies: str = field(init=False)
+    finish: Path = field(init=False)
+    temp: Path = field(init=False)
+    roi_gdf: gpd.GeoDataFrame = field(init=False, repr=False)
+    search_url: str = field(init=False, repr=False)
+    token: TokenManager = field(init=False, repr=False)
+
+    num_workers: int = field(init=False, default=1)
+    pause_prob: float = field(init=False, default=0.0)
+
+    def __post_init__(self):
+        t = self.loaded_toml
+        setter = partial(object.__setattr__, self)
+
+        # ----- identity authentication -----
+        setter('username', t['authentication']['username'])
+        setter('password', t['authentication']['password'])
+
+        # ----- proxy -----
+        ip_port = t['proxy']['ip_port']
+        setter('proxies', {"http": ip_port, "https": ip_port})
+
+        # ----- runtime settings -----
+        runtime = t['runtime']
+        # 1. save path
+        save_folder = Path(runtime['save_folder'])
+        setter('finish', save_folder / 'Finish')
+        setter('temp', save_folder / 'Temp')
+        # 2. threading num | default 1
+        setter('num_workers', runtime.get('num_workers', 1))
+        # 3. random pause probability | set to 0.0 as `no pause`, default 0.0
+        setter('pause_prob', runtime.get('random_pause_prob', 0.0))
+
+        # ----- filter -----
+        roi = Path(t['filter']['roi_json_path'])
+        setter('roi_gdf', gpd.read_file(roi))
+
+        # ----- search url -----
+        setter('search_url', t['search_url']['default'].strip())
+
+        # ----- initialize token -----
+        setter('token', TokenManager(self.username, self.password, self.proxies))
+        self.token.initialize()
 
 
 @singleton
 class SentinelDownloader:
     crs = 'EPSG: 4326'  # WGS84
-    config = Config()
+    _load = ConfigCheck()
 
     def __init__(self, config_path: Path):
         # ----- load config toml -----
-        try:
-            with open(config_path, 'r') as file:
-                config = self.config = tomlkit.load(file)
-        except FileNotFoundError:
-            raise ValueError(f"Configuration file does not exist: {config_path}")
-        except ParseError:
-            raise ValueError(f"Configuration file format error: {config_path}")
+        self._load = config_path
+        self._config = Config(loaded_toml=self._load)
 
         # ----- instance property -----
-        self.lock = threading.Lock()
         self.worker = WorkerManager()
         self.count = MultiThreadCounter()
         self.omit = MultiThreadCounter()
@@ -450,43 +519,13 @@ class SentinelDownloader:
         self._local = threading.local()
         self._local.server_md5 = None
 
-        # ----- configuration -----
-        # identity authentication
-        auth_config = config.get('authentication')
-        username = auth_config.get('username')
-        password = auth_config.get('password')
-
-        # proxy
-        ip_port = config.get('proxy').get('ip_port')
-        self.proxies = {
-            "http": ip_port,
-            "https": ip_port,
-        }
-
-        # runtime settings
-        runtime_config = config.get('runtime')
-
-        # 1. save path
-        save_folder = Path(runtime_config.get('save_folder'))
-        self._finish = save_folder / 'Finish'
-        self._temp = save_folder / 'Temp'
-
-        # 2. threading num | default 1
-        self.num_workers = runtime_config.get('num_workers', 1)
-
-        # 3. random pause probability | set to 0.0 as `no pause`, default 0.0
-        self.pause_prob = runtime_config.get('random_pause_prob', 0.0)
-
-        # filter
-        roi = Path(config.get('filter').get('roi_json_path'))
-        self.roi_gdf = gpd.read_file(roi)
-
-        # search url
-        self.search_url = config.get('search_url').get('default').strip()
-
-        # ----- initialize token -----
-        self.token = TokenManager(username, password, self.proxies)
-        self.token.initialize()
+    def __getattr__(self, item):  # delegate to config
+        if item in self._config.__dataclass_fields__:
+            return getattr(self._config, item)
+        raise AttributeError(
+            f"`{self.__class__.__name__}/{self._config.__class__.__name__}` "
+            f"object has no attribute '{item}'."
+        )
 
     @sisyphus(wait=True)
     def _rget(self, url) -> dict:
@@ -524,8 +563,8 @@ class SentinelDownloader:
             items = self._fetch_in_batch(url)
             search_result.extend([{
                 'product_id': item['Id'],
-                'save_path': (self._finish / item['Name']).with_suffix('.SAFE.zip'),
-                'temp_path': (self._temp / item['Name']).with_suffix('.SAFE.zip'),
+                'save_path': (self.finish / item['Name']).with_suffix('.SAFE.zip'),
+                'temp_path': (self.temp / item['Name']).with_suffix('.SAFE.zip'),
                 'server_md5': next((check['Value'] for check in item['Checksum'] if check['Algorithm'] == 'MD5'), None),
                 'geo_footprint': Polygon(item['GeoFootprint']['coordinates'][0]),
                 'content_length': int(item['ContentLength'])
@@ -663,8 +702,8 @@ class SentinelDownloader:
         self._random_pause(prob=self.pause_prob)
 
     def _prepare_directories(self):
-        self._finish.mkdir(parents=True, exist_ok=True)
-        self._temp.mkdir(parents=True, exist_ok=True)
+        self.finish.mkdir(parents=True, exist_ok=True)
+        self.temp.mkdir(parents=True, exist_ok=True)
 
     def multi_download(self):
         self._prepare_directories()

@@ -25,7 +25,6 @@ keyboard = ">=0.13.5,<0.14"
 shapely = ">=2.1.2,<3"
 python-dotenv = ">=1.2.1,<2"
 tomlkit = ">=0.13.3,<0.14"
-pip = ">=25.2,<26"
 
 [pypi-dependencies]
 
