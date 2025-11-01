@@ -24,7 +24,7 @@ import functools
 from concurrent.futures import ThreadPoolExecutor, as_completed, CancelledError
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
-from typing import Callable, Optional, Any, Tuple, List, Type, Union
+from typing import Callable, Optional, Any, Tuple, List, Type, Union, Literal
 import inspect
 import traceback
 import re
@@ -103,7 +103,7 @@ def sisyphus(
     return error_handler
 
 
-def singleton(cls):
+def singleton(cls: type):
     instances = {}
     def get_instance(*args, **kwargs):
         if cls not in instances:
@@ -129,9 +129,9 @@ class ThreadManager:
 
     def _cancel(self):  # async
         self._on_hotkey()
-        for f in self._futures:
-            if not f.done():
-                f.cancel()
+        [
+            f.cancel() for f in self._futures if not f.done
+        ]
         self._stop.set()
 
     @contextmanager
@@ -334,7 +334,7 @@ class TokenManager:
         self._refresh_time = None
         self._lock = threading.RLock()  # || todo: check if there is nested lock || fixed ✔
 
-    def _get_token(self, token_type: str) -> tuple[str, str]:
+    def _get_token(self, token_type: Literal['access_token', 'refresh_token']) -> tuple[str, str]:
         data: dict = {}
         match token_type:
             case 'access_token':
@@ -452,7 +452,7 @@ class ValidatedInput:
     def __init__(
             self,
             data_type: Type,
-            data_range: Optional[Union[Tuple[int|float, int|float], List[int|float]]] = None,
+            data_range: Optional[Union[Tuple[int | float, int | float], List[int | float]]] = None,
             contains: Optional[List[str]] = None,
             regex: Optional[str] = None,
             error_message: Optional[str] = None
@@ -615,7 +615,7 @@ class SentinelDownloader:
         self._local = threading.local()
         self._local.server_md5 = None
 
-    def __getattr__(self, item):
+    def __getattr__(self, item: str) -> Any:
         if hasattr(self._config, item):
             return getattr(self._config, item)
         raise AttributeError(
@@ -624,7 +624,7 @@ class SentinelDownloader:
         )
 
     @sisyphus(wait=True)
-    def _rget(self, url) -> dict:
+    def _rget(self, url: str | Literal[b""]) -> dict:
         """requests get"""
         with requests.get(url=url, proxies=self.proxies, timeout=(10, 30)) as response:
             response.raise_for_status()
@@ -633,24 +633,21 @@ class SentinelDownloader:
     def _get_total_count(self) -> int:
         return self._rget(self.search_url).get('@odata.count', 0)
 
-    def _build_url(self, batch_size: int, skip: int):
+    def _build_url(self, batch_size: int, skip: int) -> Literal[b""]:
         parsed_url = urlparse(self.search_url)
         query_params = parse_qs(parsed_url.query)
-        if '$top' not in query_params or '$skip' not in query_params:
-            raise ValueError('`search_url` format error, missing `$top` or `$skip` parameter.')
         query_params['$top'] = [str(batch_size)]
         query_params['$skip'] = [str(skip)]
         new_query = urlencode(query_params, doseq=True)
         return urlunparse(parsed_url._replace(query=new_query))
 
-    def _fetch_in_batch(self, url) -> list:
+    def _fetch_in_batch(self, url: str | Literal[b""]) -> list:
         return self._rget(url).get('value', [])
 
     @sisyphus(wait=False)
     def search(self, batch_size: int = 900) -> list:
         search_result = []
-        total = self._get_total_count()
-        if total == 0:
+        if (total := self._get_total_count()) == 0:
             console.log('No data found.')
             sys.exit(0)
         console.log(f'Found {total} records. Collecting ...')
@@ -672,16 +669,9 @@ class SentinelDownloader:
         product_gdf = gpd.GeoDataFrame(geometry=[geo_footprint], crs=self.crs)
         return len(gpd.overlay(product_gdf, self.roi_gdf, how='intersection', keep_geom_type=False)) > 0
 
-    def _hash_check(self, file_path: Path) -> bool:
-        h = hashlib.md5()
-        with open(file_path, 'rb') as f:
-            for chunk in iter(lambda: f.read(8192), b""):
-                h.update(chunk)
-        return h.hexdigest() == self._local.server_md5
-
-    def _file_check(self, save_path: Path, temp_path: Path) -> bool:
+    def _file_check(self, save_path: Path, temp_path: Path, chunk_md5: str) -> bool:
         if temp_path.exists():
-            if self._hash_check(temp_path):
+            if chunk_md5 == self._local.server_md5:
                 shutil.move(temp_path, save_path)
                 console.log(f'Download completed: [italic indian_red]{save_path.name}[/]. [green]✔')
                 self.count.update()
@@ -707,12 +697,14 @@ class SentinelDownloader:
     @staticmethod
     def _prometheus(func: Callable):
         @functools.wraps(func)
-        def error_handler(self: SentinelDownloader, **kwargs):
+        def _write_error_handler(self: SentinelDownloader, **kwargs):
             task_id = self.worker.get_worker_id()
             completed = False
             while not completed:  # uncaught exception will break this while loop anyway
                 try:
-                    func(self, **kwargs)
+                    completed = self._file_check(
+                        kwargs.get('_save_path'), kwargs.get('temp_path'), func(self, **kwargs)
+                    )
                 except HTTPError as e:
                     console.log(f'Thread-{task_id} || [italic]Failed[/] @{e}. [red]✘')
                 except RequestException as e:
@@ -723,32 +715,32 @@ class SentinelDownloader:
                         task_id=task_id,
                         description=f'Thread-{task_id} || Pending...',
                     )
-                    completed = self._file_check(
-                        kwargs.get('_save_path'), kwargs.get('temp_path')
-                    )
 
-        return error_handler
+        return _write_error_handler
 
     @_prometheus
-    def _write(self, product_id: str, _save_path: Path, temp_path: Path, file_size: int):
+    def _write(self, product_id: str, _save_path: Path, temp_path: Path, file_size: int) -> str:
         download_url = f"https://download.dataspace.copernicus.eu/odata/v1/Products({product_id})/$value"
         session = requests.Session()
         session.headers.update({'Authorization': f'Bearer {self.token.access_token}'})
         task_id = self.worker.get_worker_id()
+        h = hashlib.md5()
 
         with session.get(url=download_url, stream=True, proxies=self.proxies, timeout=(30, 60)) as response:
             response.raise_for_status()
             with open(temp_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=1024 * 1024):
-                    if chunk:
+                    if size := len(chunk):
                         f.write(chunk)
+                        h.update(chunk)
                         self.progress.update(
                             task_id=task_id,
                             description=temp_path.name,
-                            advance=len(chunk),
+                            advance=size,
                             total=file_size,
                             visible=True
                         )
+        return h.hexdigest()
 
     def _random_pause(self, prob: float = 0.5, p_min: int = 60, p_max: int = 600, seed: int | float = time.time()):
         WarnIf(p_max >= SmartDownloadColumn.threshold)(
@@ -757,9 +749,8 @@ class SentinelDownloader:
         )
         task_id = self.worker.get_worker_id()
         rng = random.Random(seed + task_id)
-        p = rng.random()
         wait_time = rng.randint(p_min, p_max)
-        if p < prob:
+        if rng.random() < prob:
             self.progress.reset(
                 task_id=task_id,
                 description=f'Thread-{task_id} || Pausing ...',
@@ -788,7 +779,7 @@ class SentinelDownloader:
 
         time.sleep(random.uniform(0, 3))
         self._local.server_md5 = server_md5
-        self._write(
+        self._write(  # strictly require kwargs here
             product_id=product_id,
             _save_path=save_path,
             temp_path=temp_path,
